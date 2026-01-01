@@ -71,28 +71,28 @@ export const uploadImage = async (base64) => {
   try {
     const IMGBB_API_KEY = '983792cb00fcc07ce22956cf5174092b';
 
-    // 使用 URLSearchParams 替代 FormData，这是最稳妥的 Base64 上传方式
-    const params = new URLSearchParams();
-    params.append('image', base64);
+    // 关键点 1：彻底移除可能存在的 data:image/xxx;base64, 前缀
+    const cleanBase64 = base64.includes(',') ? base64.split(',')[1] : base64;
 
-    const response = await axios.post(`https://api.imgbb.com/1/upload?key=${IMGBB_API_KEY}`, params, {
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded'
-      },
+    // 关键点 2：使用标准 FormData
+    const formData = new FormData();
+    formData.append('image', cleanBase64);
+
+    // 关键点 3：不要手动写 headers，让 axios 根据 formData 自动设置
+    const response = await axios.post(`https://api.imgbb.com/1/upload?key=${IMGBB_API_KEY}`, formData, {
       timeout: 30000
     });
 
     if (response.data && response.data.success && response.data.data && response.data.data.url) {
-      console.log('Upload Success:', response.data.data.url);
+      console.log('✅ 上传成功:', response.data.data.url);
       return response.data.data.url;
     }
 
-    throw new Error('ImgBB 接口返回异常');
+    throw new Error('ImgBB 接口响应异常');
   } catch (error) {
-    // 详细记录错误，方便排查
-    const errorMsg = error.response?.data?.error?.message || error.message;
-    console.error('Upload Error Details:', error.response?.data || error.message);
-    throw new Error('上传参考图失败：' + errorMsg);
+    const errorDetails = error.response?.data || error.message;
+    console.error('❌ 上传失败详情:', errorDetails);
+    throw new Error('上传参考图失败：' + (error.response?.data?.error?.message || error.message));
   }
 };
 
