@@ -1,25 +1,30 @@
 import axios from 'axios';
 
-// API 配置 - 速创API
-const API_BASE_URL = 'https://api.wuyinkeji.com';
-const API_KEY = 'tLdPCRBfuA4nK1Exu9h9lNh2a6';
-const API_ENDPOINT = '/api/img/nanoBanana-pro'; // 速创API端点
+/**
+ * 🍌 Banana AI - GRSAI API Service
+ * 严格按照最新国内直连节点文档实现
+ */
+
+// API 配置 - GRSAI 国内直连节点
+const API_BASE_URL = 'https://grsai.dakka.com.cn';
+// 从环境变量获取 API Key，增强安全性
+const API_KEY = import.meta.env.VITE_GRSAI_API_KEY || 'sk-cb6ce7c67127418e91a56c3892604f34';
+const API_ENDPOINT = '/v1/draw/nano-banana'; // Nano Banana 绘画接口
+const RESULT_ENDPOINT = '/v1/draw/result';   // 单独轮询结果接口
+const MODEL_NAME = 'nano-banana-pro';        // 用户指定的模型
 
 // 创建 axios 实例
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
   headers: {
-    'Content-Type': 'application/json;charset=utf-8',
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${API_KEY}`,
   },
   timeout: 60000,
 });
 
 /**
  * 压缩图片并转为 Base64
- * @param {File} file 文件对象
- * @param {number} maxWidth 最大宽度
- * @param {number} maxHeight 最大高度
- * @param {number} quality 质量 (0-1)
  */
 export const compressImage = (file, maxWidth = 1024, maxHeight = 1024, quality = 0.8) => {
   return new Promise((resolve, reject) => {
@@ -33,7 +38,6 @@ export const compressImage = (file, maxWidth = 1024, maxHeight = 1024, quality =
         let width = img.width;
         let height = img.height;
 
-        // 计算缩放比例
         if (width > height) {
           if (width > maxWidth) {
             height *= maxWidth / width;
@@ -51,9 +55,7 @@ export const compressImage = (file, maxWidth = 1024, maxHeight = 1024, quality =
         const ctx = canvas.getContext('2d');
         ctx.drawImage(img, 0, 0, width, height);
 
-        // 导出为 jpeg (通常比 png 小得多)
         const dataUrl = canvas.toDataURL('image/jpeg', quality);
-        // 移除前缀
         const base64 = dataUrl.split(',')[1];
         resolve(base64);
       };
@@ -64,88 +66,72 @@ export const compressImage = (file, maxWidth = 1024, maxHeight = 1024, quality =
 };
 
 /**
- * 将图片上传并获取 URL
- * 【终极回归版】：通过本站 API 中转，解决跨域并确性能。
+ * 将图片上传并获取 URL (ImgBB)
+ * Note: 文档显示 urls 支持 Base64，但为了稳定性推荐使用 URL
  */
 export const uploadImage = async (base64) => {
   try {
-    // 强制调用本站 Vercel 提供的后端中转接口
-    const uploadUrl = '/api/upload';
+    const imgbbKey = 'bd521134b0e14ad15cf962e2d002544e';
+    const formData = new FormData();
+    formData.append('image', base64.replace(/^data:image\/\w+;base64,/, ""));
 
-    const response = await axios.post(uploadUrl, {
-      base64: base64
-    }, {
-      headers: { 'Content-Type': 'application/json' },
+    const response = await axios.post(`https://api.imgbb.com/1/upload?key=${imgbbKey}`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
       timeout: 30000
     });
 
-    if (response.data && response.data.success && response.data.url) {
-      console.log('✅ 内部上传成功:', response.data.url);
-      return response.data.url;
+    if (response.data && response.data.success && response.data.data.url) {
+      console.log('✅ ImgBB 上传成功:', response.data.data.url);
+      return response.data.data.url;
     }
-
-    throw new Error('中转服务器返回异常');
+    throw new Error(response.data?.error?.message || '图床返回异常');
   } catch (error) {
     console.error('❌ 上传失败:', error.response?.data || error.message);
-    throw new Error('上传参考图失败：服务器线路波动，请重试');
+    throw new Error('图片上传失败：请检查网络连接');
   }
 };
 
-// 通用生成函数
+/**
+ * 通用生成函数 (适配 GRSAI 最新文档)
+ */
 const generateContent = async ({ prompt, images = [], aspectRatio, resolution }) => {
-  // 映射分辨率到 imageSize (1k/2k/4k -> 1K/2K/4K)
+  // 分辨率处理: 默认 1K
   const imageSize = resolution ? resolution.toUpperCase() : '1K';
 
-  // 构造请求 Body (按文档要求使用 JSON 格式)
+  // 构造请求 Body (严格遵循文档)
   const body = {
-    key: API_KEY,
+    model: MODEL_NAME,
     prompt: prompt,
     aspectRatio: aspectRatio || '1:1',
-    imageSize: imageSize
+    imageSize: imageSize,
+    webHook: "-1",   // CRITICAL: 填 "-1" 以便立即返回任务 ID 用于轮询
+    shutProgress: false
   };
 
-  // 添加图片参数 (如果有)
+  // 处理参考图
   if (images && images.length > 0) {
-    // 关键修复：确保所有 Base64 都在发送给速创 API 之前转为外网 URL
     const imageUrls = await Promise.all(images.map(async img => {
-      // 如果已经是公开 HTTP URL，保持不变
-      if (typeof img === 'string' && img.startsWith('http')) {
-        return img;
-      }
+      if (typeof img === 'string' && img.startsWith('http')) return img;
 
-      // 如果是 Base64 (裸串或 Data URI)，先上传到图床
       let base64ToUpload = img;
-      if (img.startsWith('data:')) {
-        base64ToUpload = img.split(',')[1];
-      }
-
+      if (img.startsWith('data:')) base64ToUpload = img.split(',')[1];
       return await uploadImage(base64ToUpload);
     }));
-
-    body.img_url = imageUrls;
+    body.urls = imageUrls;
   }
 
   try {
-    // 【关键优化】：将鉴权信息同时放入 Header 和 Query 参数中，对齐官方“授权管理”说明
-    const response = await apiClient.post(`${API_ENDPOINT}?key=${API_KEY}`, body, {
-      headers: {
-        'Authorization': API_KEY
-      }
-    });
-
-    // 解析速创API响应格式
+    // 1. 提交任务
+    console.log('🚀 正在提交 GRSAI 任务:', body);
+    const response = await apiClient.post(API_ENDPOINT, body);
     const data = response.data;
 
-    // 检查响应状态
-    if (data.code !== 200) {
-      throw new Error(data.msg || '生成失败');
-    }
-
-    // 检查是否返回了任务ID(异步模式)
-    if (data.data && data.data.id && !data.data.image_url && !data.data.url) {
+    // 2. 检查 code 是否为 0 (成功)
+    if (data.code === 0 && data.data?.id) {
       const taskId = data.data.id;
+      console.log('📝 任务已创建, ID:', taskId);
 
-      // 轮询获取结果
+      // 3. 轮询结果
       const imageUrl = await pollTaskResult(taskId);
 
       return {
@@ -153,90 +139,79 @@ const generateContent = async ({ prompt, images = [], aspectRatio, resolution })
         data: data,
         imageUrl: imageUrl,
       };
+    } else {
+      throw new Error(data.msg || '提交绘画任务失败');
     }
-
-    // 获取图片URL - 尝试多种可能的路径(同步模式)
-    const imageUrl = data.data?.image_url || data.data?.url || data.image_url || data.url;
-
-    if (!imageUrl) {
-      throw new Error('API 响应中未找到图像数据');
-    }
-
-    return {
-      success: true,
-      data: data,
-      imageUrl: imageUrl, // 速创API返回的是图片URL,不是base64
-    };
 
   } catch (error) {
-    console.error('Generation Error:', error.response?.data || error.message);
+    console.error('❌ Generation Error (GRSAI):', error.response?.data || error.message);
     return {
       success: false,
-      error: error.response?.data?.msg || error.message || '生成失败',
+      error: error.response?.data?.msg || error.message || '生成失败，请检查配置',
     };
   }
 };
 
-// 轮询任务结果
-const pollTaskResult = async (taskId, maxAttempts = 60, interval = 2000) => {
-  const RESULT_ENDPOINT = '/api/img/drawDetail'; // 正确的查询详情接口
-
+/**
+ * 轮询任务结果 (适配 GRSAI 单独结果接口)
+ */
+const pollTaskResult = async (taskId, maxAttempts = 60, interval = 3000) => {
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
-      // 等待一段时间再查询
-      if (attempt > 0) {
-        await new Promise(resolve => setTimeout(resolve, interval));
-      }
+      // 等待间隔
+      if (attempt > 0) await new Promise(resolve => setTimeout(resolve, interval));
 
-      const params = new URLSearchParams();
-      params.append('key', API_KEY);
-      params.append('id', taskId);
+      // POST /v1/draw/result { "id": "xxxxx" }
+      const response = await apiClient.post(RESULT_ENDPOINT, { id: taskId });
+      const res = response.data;
 
-      const response = await apiClient.get(`${RESULT_ENDPOINT}?${params.toString()}`);
-      const data = response.data;
+      // code: 0 为成功/任务存在, -22 为任务不存在
+      if (res.code === 0 && res.data) {
+        const taskData = res.data;
+        const status = taskData.status;
+        const progress = taskData.progress;
 
-      if (data.code === 200 && data.data) {
-        const taskData = data.data;
+        console.log(`⏳ 任务进度: ${progress}%, 状态: ${status}`);
 
-        // 检查任务状态: 0:排队中，1:生成中，2:成功，3:失败
-        if (taskData.status === 2) {
-          // 成功,获取图片URL
-          const imageUrl = taskData.image_url;
-          if (imageUrl) {
-            return imageUrl;
-          }
-        } else if (taskData.status === 3) {
-          // 失败
-          const reason = taskData.fail_reason || '图片生成失败';
-          throw new Error(reason);
+        if (status === 'succeeded') {
+          const resultImg = taskData.results?.[0]?.url;
+          if (resultImg) return resultImg;
+          throw new Error('未获取到生成的图片地址');
+        } else if (status === 'failed') {
+          const reason = taskData.failure_reason || taskData.error || '图片生成失败';
+          throw new Error(`生成失败: ${reason}`);
         }
-        // 0:排队中，1:生成中 - 继续轮询
+        // status 为 "running" 时继续轮询
+      } else if (res.code !== 0 && res.code !== -22) {
+        throw new Error(res.msg || '查询结果异常');
       }
+
+      // 如果 code 为 -22，表示任务可能还在初始化，继续轮询
+      if (res.code === -22) {
+        console.log('📡 任务初始化中...');
+      }
+
     } catch (error) {
-      // 如果是明确的失败错误,直接抛出
-      if (error.message && error.message !== '图片生成失败') {
-        throw error;
-      }
+      // 如果是明确的失败（业务失败），不再重试
+      if (error.message.startsWith('生成失败:')) throw error;
+
+      if (attempt === maxAttempts - 1) throw error;
+      console.warn(`轮询尝试 ${attempt} 异常:`, error.message);
     }
   }
-
-  throw new Error('获取图片超时,请稍后重试');
+  throw new Error('获取结果超时，请尝试刷新页面重试');
 };
 
 /**
  * 文本生成图像
  */
 export const textToImage = async ({ prompt, negativePrompt = '', aspectRatio = '1:1', resolution = '1k' }) => {
-  // 将负面提示词合并到 Prompt 中
-  const fullPrompt = negativePrompt
-    ? `${prompt}, 负面提示词: ${negativePrompt}`
-    : prompt;
-
+  const fullPrompt = negativePrompt ? `${prompt} --no ${negativePrompt}` : prompt;
   return generateContent({ prompt: fullPrompt, images: [], aspectRatio, resolution });
 };
 
 /**
- * 图像生成图像 / 多图融合 (支持 1-10 张图片)
+ * 图像生成图像 / 多图融合
  */
 export const imageToImage = async ({
   images = [],
@@ -245,11 +220,8 @@ export const imageToImage = async ({
   aspectRatio = '1:1',
   resolution = '1k'
 }) => {
-  // 速创API不直接支持strength参数,可以通过提示词来控制
-  const enhancedPrompt = prompt;
-
   return generateContent({
-    prompt: enhancedPrompt,
+    prompt,
     images: images,
     aspectRatio,
     resolution
@@ -266,9 +238,7 @@ export const multiFusion = async ({
   aspectRatio = '1:1',
   resolution = '1k'
 }) => {
-  // 融合模式通过提示词表达
-  const fusionPrompt = `融合模式: ${mode}. ${prompt}`;
-
+  const fusionPrompt = prompt || `mode: ${mode}`;
   return generateContent({
     prompt: fusionPrompt,
     images: images,
@@ -278,16 +248,12 @@ export const multiFusion = async ({
 };
 
 /**
- * 将图像文件转换为 Base64 (仅数据部分)
+ * 文件转 Base64
  */
 export const fileToBase64 = (file) => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = () => {
-      // 移除 data:image/...;base64, 前缀
-      const base64 = reader.result.split(',')[1];
-      resolve(base64);
-    };
+    reader.onload = () => resolve(reader.result.split(',')[1]);
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
