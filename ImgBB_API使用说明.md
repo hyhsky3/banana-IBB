@@ -26,7 +26,7 @@
 
 ```javascript
 export const uploadImage = async (base64) => {
-  const apiKey = 'bd521134b0e14ad15cf962e2d002544e';
+  const apiKey = 'bd521134b0e14ad15c';
   const formData = new FormData();
   
   // 必须剔除 Base64 的 Data-URI 前缀
