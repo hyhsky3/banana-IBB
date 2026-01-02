@@ -108,23 +108,29 @@ const generateContent = async ({ prompt, images = [], aspectRatio, resolution })
     shutProgress: false
   };
 
-  // 处理参考图
+  // 处理参考图 - 切换回 ImgBB 上传模式
   if (images && images.length > 0) {
-    const imageUrls = await Promise.all(images.map(async img => {
-      // 如果已经是公网 URL，直接返回
-      if (typeof img === 'string' && img.startsWith('http')) return img;
+    try {
+      console.log(`📸 正在准备上传 ${images.length} 张参考图到 ImgBB...`);
+      const imageUrls = await Promise.all(images.map(async (img) => {
+        // 如果已经是公网 URL，直接返回
+        if (typeof img === 'string' && img.startsWith('http')) return img;
+        
+        // 如果是 Base64 (带前缀或不带前缀)，调用上传函数
+        // 确保上传前不带前缀，uploadImage 内部已经处理了 replace 逻辑，但这里为了安全再次确保
+        const base64Data = typeof img === 'string' && img.includes('base64,') 
+          ? img.split('base64,')[1] 
+          : img;
+          
+        return await uploadImage(base64Data);
+      }));
       
-      // 如果是 Base64 (带前缀或不带前缀)，直接组合成 API 要求的格式
-      // 注意：GRSAI 文档通常支持 data:image/... 格式或纯 base64
-      // 这里我们为了兼容性，统一确保它是带 data:image/jpeg;base64, 前缀的格式，或者按文档直接传
-      if (typeof img === 'string' && img.startsWith('data:')) {
-        return img;
-      }
-      
-      // 如果是纯 Base64 (来自 compressImage)，补充前缀
-      return `data:image/jpeg;base64,${img}`;
-    }));
-    body.urls = imageUrls;
+      body.urls = imageUrls;
+      console.log('🔗 所有参考图已上传并获取 URL:', imageUrls);
+    } catch (uploadError) {
+      console.error('❌ 图片预上传失败:', uploadError);
+      throw new Error(`图片上传失败: ${uploadError.message}`);
+    }
   }
 
   try {
